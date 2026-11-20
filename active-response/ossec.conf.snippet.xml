@@ -1,0 +1,24 @@
+<!--
+  Manager-side Active Response configuration.
+  Add inside <ossec_config> in /var/ossec/etc/ossec.conf on the Wazuh manager,
+  then restart wazuh-manager.
+
+  The kill-ransom.exe binary must be placed on each Windows agent in:
+    C:\Program Files (x86)\ossec-agent\active-response\bin\
+
+  Only "kill-eligible" rules are bound to Active Response. Context rules
+  (111001, 111002, 111006, 111009, 111011) are alert-only on purpose:
+  a single volume anomaly, or a native Windows utility (vssadmin, powershell)
+  as the current process, is not enough to justify killing a process.
+-->
+<command>
+  <name>kill-ransom</name>
+  <executable>kill-ransom.exe</executable>
+  <timeout_allowed>no</timeout_allowed>
+</command>
+
+<active-response>
+  <command>kill-ransom</command>
+  <location>local</location>
+  <rules_id>111003,111004,111005,111007,111008,111010,111012</rules_id>
+</active-response>

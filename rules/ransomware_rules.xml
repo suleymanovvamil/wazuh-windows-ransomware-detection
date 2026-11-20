@@ -1,0 +1,279 @@
+<!--
+  Wazuh Windows Ransomware Detection Rules
+  =========================================
+  Behavioral + correlation rules for detecting ransomware activity on Windows
+  endpoints using Sysmon telemetry.
+
+  Requirements:
+    - Wazuh manager 4.x
+    - Windows agent with Sysmon (Event IDs 1, 11, 23, 26 enabled)
+    - Built-in Wazuh Sysmon ruleset (61613 = Sysmon Event 11 FileCreate,
+      63103 = Security log cleared, 650 = active-responses.log entries)
+
+  Install:
+    Append the contents of this file to /var/ossec/etc/rules/local_rules.xml
+    (or copy it as /var/ossec/etc/rules/ransomware_rules.xml) and restart:
+      systemctl restart wazuh-manager
+
+  Rule ID layout:
+    110xxx  base / atomic rules
+    111xxx  correlation rules (alerts worth acting on)
+    11002x  Active Response result monitoring
+
+  See docs/known-issues.md for issues found during testing (111007, 111011).
+-->
+
+<!-- ===================================================================== -->
+<!-- 1. Mass file activity                                                  -->
+<!-- ===================================================================== -->
+<group name="ransomdetect,">
+  <rule id="110001" level="3">
+    <if_sid>61613</if_sid>
+    <description>Sysmon Event 11 (FileCreate): $(win.eventdata.targetFilename)</description>
+  </rule>
+
+  <rule id="111001" level="10" frequency="20" timeframe="30">
+    <if_matched_sid>110001</if_matched_sid>
+    <same_field>win.eventdata.image</same_field>
+    <same_field>win.eventdata.processGuid</same_field>
+    <description>Potential Ransomware Behaviour: $(win.eventdata.image) created 20+ files in 30 seconds</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+
+  <rule id="110002" level="5">
+    <if_sid>61613</if_sid>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)\.(crypt(o|ed)?|encrypt(ed)?|enc|locked?|locky|ryk|wncry|wnry|cerber|zepto|odin|ransom)$</field>
+    <description>File created with suspicious (ransomware-like) extension</description>
+  </rule>
+
+  <rule id="111002" level="12" frequency="10" timeframe="30">
+    <if_matched_sid>110002</if_matched_sid>
+    <same_field>win.eventdata.processGuid</same_field>
+    <description>Potential Ransomware Behaviour: $(win.eventdata.image) created 10+ files with suspicious extensions in 30 seconds</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+
+  <rule id="111003" level="14">
+    <if_matched_sid timeframe="60">110001</if_matched_sid>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)(read[_-]?me|readme|how[-_ ]?to[-_ ]?decrypt|restore[-_ ]?files|decrypt[-_ ]?instructions?|recovery[-_ ]?file)[._ -]?[a-z0-9]*\.(txt|html|hta|bmp|png)</field>
+    <same_field>win.eventdata.processGuid</same_field>
+    <description>Potential Ransomware Behaviour: $(win.eventdata.image) created a possible ransom note after modifying many files</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+
+  <rule id="111004" level="15">
+    <if_sid>110001</if_sid>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)\\[^\\]*canary[^\\]*$</field>
+    <description>Potential Ransomware Behaviour: $(win.eventdata.image) modified a canary file: $(win.eventdata.targetFilename)</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+</group>
+
+<!-- ===================================================================== -->
+<!-- 2. Defense / recovery tampering + encryption                           -->
+<!-- ===================================================================== -->
+<group name="ransomtamper,">
+  <rule id="110008" level="15">
+    <if_group>sysmon_event1</if_group>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)vssadmin(\.exe)?\s+delete\s+shadows</field>
+    <description>VSS shadow copies deleted via vssadmin</description>
+    <mitre>
+      <id>T1490</id>
+    </mitre>
+  </rule>
+
+  <rule id="111008" level="15" frequency="2" timeframe="300" ignore="300">
+    <if_sid>110002</if_sid>
+    <if_matched_sid>110008</if_matched_sid>
+    <same_field>win.eventdata.user</same_field>
+    <description>Potential Ransomware Behaviour: $(win.eventdata.image) created files with suspicious extensions after shadow copies were deleted</description>
+    <mitre>
+      <id>T1490</id>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+
+  <rule id="110007" level="15">
+    <if_group>sysmon_event1</if_group>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)Set-MpPreference.*-Disable\w+\s+(\$true|1)</field>
+    <description>Windows Defender protection disabled via Set-MpPreference</description>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+  <!--
+    KNOWN ISSUE: as tested, this rule has no current-event file-write condition,
+    so it fires on the second Set-MpPreference process event and the alert
+    carries powershell.exe instead of the encrypting process.
+    Recommended fix (see docs/known-issues.md):
+      <rule id="111007" level="15" frequency="2" timeframe="300">
+        <if_sid>110002</if_sid>
+        <if_matched_sid>110007</if_matched_sid>
+        <same_location/>
+        ...
+  -->
+  <rule id="111007" level="15" timeframe="600" ignore="300">
+    <if_matched_sid>110007</if_matched_sid>
+    <same_location/>
+    <description>Potential Ransomware Behaviour: $(win.eventdata.image) activity after Windows Defender was disabled</description>
+    <mitre>
+      <id>T1562.001</id>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+</group>
+
+<group name="ransominhibition,">
+  <rule id="111006" level="15" frequency="2" timeframe="300">
+    <if_matched_sid>110008</if_matched_sid>
+    <same_location/>
+    <description>Potential Ransomware Behaviour: 2+ recovery destruction signals detected</description>
+    <mitre>
+      <id>T1490</id>
+    </mitre>
+  </rule>
+</group>
+
+<!-- ===================================================================== -->
+<!-- 3. Encryption from user-writable location (AppData)                    -->
+<!-- ===================================================================== -->
+<group name="ransomappdata,">
+  <rule id="110005" level="14">
+    <if_sid>61613</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\+users\\+[^\\]+\\+appdata\\+</field>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)\.(crypt(o|ed)?|encrypt(ed)?|enc|locked?|locky|ryk|wncry|wnry|cerber|zepto|odin|ransom)$</field>
+    <description>File with suspicious extension created by process running from AppData: $(win.eventdata.image)</description>
+  </rule>
+
+  <rule id="111005" level="14" frequency="15" timeframe="120" ignore="60">
+    <if_matched_sid>110005</if_matched_sid>
+    <same_field>win.eventdata.processGuid</same_field>
+    <description>Potential Ransomware Behaviour: $(win.eventdata.image) running from AppData encrypted 15+ files</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+</group>
+
+<!-- ===================================================================== -->
+<!-- 4. Security log cleared + encryption                                   -->
+<!-- ===================================================================== -->
+<group name="ransomlogclear,">
+  <rule id="110009" level="15">
+    <if_sid>63103</if_sid>
+    <description>Windows Security log cleared by $(win.logFileCleared.subjectUserName) (PID $(win.logFileCleared.clientProcessId))</description>
+    <mitre>
+      <id>T1070.001</id>
+    </mitre>
+  </rule>
+
+  <rule id="111009" level="15" timeframe="600" ignore="300">
+    <if_sid>110002, 110005, 111005, 111007, 111008</if_sid>
+    <if_matched_sid>110009</if_matched_sid>
+    <same_location/>
+    <description>Potential Ransomware Behaviour: $(win.eventdata.image) created files with suspicious extensions after Security log was cleared</description>
+    <mitre>
+      <id>T1070.001</id>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+</group>
+
+<!-- ===================================================================== -->
+<!-- 5. Ransom note replication                                             -->
+<!-- ===================================================================== -->
+<group name="ransomnotes,">
+  <rule id="111010" level="15" frequency="3" timeframe="60">
+    <if_matched_sid>111003</if_matched_sid>
+    <same_field>win.eventdata.processGuid</same_field>
+    <description>Potential Ransomware Behaviour: $(win.eventdata.image) created multiple ransom notes in 60 seconds</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+</group>
+
+<!-- ===================================================================== -->
+<!-- 6. Mass deletion                                                       -->
+<!-- ===================================================================== -->
+<!--
+  KNOWN ISSUE: 110011 has no path filter. A PyInstaller one-file Active
+  Response binary unpacks to C:\Windows\Temp\_MEIxxxx and deletes those files
+  on exit, which triggers 111011 and can create a self-triggering loop.
+  Add a path filter for monitored data folders and exclude the AR binary and
+  wazuh-agent.exe before using this in production (see docs/known-issues.md).
+-->
+<group name="ransomdelete,">
+  <rule id="110011" level="3">
+    <if_group>sysmon</if_group>
+    <field name="win.system.eventID" type="pcre2">^(23|26)$</field>
+    <description>File deleted: $(win.eventdata.targetFilename)</description>
+  </rule>
+
+  <rule id="111011" level="15" frequency="10" timeframe="60">
+    <if_matched_sid>110011</if_matched_sid>
+    <same_field>win.eventdata.processGuid</same_field>
+    <description>Potential Ransomware Behaviour: $(win.eventdata.image) deleted 10+ files in 60 seconds</description>
+    <mitre>
+      <id>T1485</id>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+</group>
+
+<!-- ===================================================================== -->
+<!-- 7. High-confidence local ransomware                                    -->
+<!-- ===================================================================== -->
+<group name="ransomconfirmed,">
+  <rule id="110012" level="6">
+    <if_sid>61613</if_sid>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)\.(crypt(o|ed)?|encrypt(ed)?|enc|locked?|locky|ryk|wncry|wnry|cerber|zepto|odin|ransom)$</field>
+    <field name="win.eventdata.image" type="pcre2" negate="yes">(?i)\\+users\\+[^\\]+\\+appdata\\+</field>
+    <description>File with suspicious extension created by $(win.eventdata.image)</description>
+  </rule>
+
+  <rule id="111012" level="15" frequency="10" timeframe="60">
+    <if_matched_sid>110012</if_matched_sid>
+    <same_field>win.eventdata.processGuid</same_field>
+    <description>Confirmed Ransomware: $(win.eventdata.image) encrypted 10+ files in 60 seconds</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+</group>
+
+<!-- ===================================================================== -->
+<!-- 8. Active Response result monitoring                                   -->
+<!--    (agent must forward active-responses.log)                           -->
+<!-- ===================================================================== -->
+<group name="ransomar,active_response,">
+  <rule id="110020" level="13">
+    <if_sid>650</if_sid>
+    <regex type="pcre2">kill-ransom\.exe: rule \d+: killed [A-Za-z]:\\</regex>
+    <description>Active Response: ransomware process killed by kill-ransom</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+
+  <rule id="110021" level="10">
+    <if_sid>650</if_sid>
+    <regex type="pcre2">kill-ransom\.exe: rule \d+: NOT KILLED</regex>
+    <description>Active Response: process NOT killed due to exclusion - review manually</description>
+  </rule>
+
+  <rule id="110022" level="12">
+    <if_sid>650</if_sid>
+    <regex type="pcre2">kill-ransom\.exe: rule \d+: could not kill</regex>
+    <description>Active Response: kill-ransom failed to kill process</description>
+  </rule>
+</group>
